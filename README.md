@@ -15,3 +15,7 @@ interp.load.ivy(
     ("org.platanios" %% "tensorflow" % "0.4.1").withClassifier("linux-cpu-x86_64")
 )
 ```
+
+- https://github.com/alexarchambault/plotly-scala
+- https://www.tensorflow.org/api_docs/python/tf/keras/layers/Conv2D
+- https://github.com/eaplatanios/tensorflow_scala/blob/master/modules/examples/src/main/scala/org/platanios/tensorflow/examples/LinearRegression.scala

@@ -3,11 +3,15 @@ val tensorflow = Seq(
   "org.platanios" %% "tensorflow-data" % "0.4.1"
 )
 
+val audiofile = Seq(
+  "de.sciss" %% "audiofile" % "1.5.1"
+)
+
 lazy val root = (project in file("."))
   .settings(
     name := "tensorderp",
     organization := "glngn",
     version := "0.1.0-SNAPSHOT",
     scalaVersion := "2.12.10",
-    libraryDependencies ++= tensorflow
+    libraryDependencies ++= tensorflow ++ audiofile
   )
