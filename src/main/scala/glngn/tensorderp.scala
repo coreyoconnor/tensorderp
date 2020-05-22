@@ -81,30 +81,62 @@ class QuantizedAudioTransforms(quantizedSize: Int = 255) {
     sign(v) * log1p(abs(v) * quantizedSizeO) / quantizedSizeLog1pO
   }
 
+  def muLawCompandingInverseO(v: Output[Float]): Output[Float] = {
+    import OOps.Math.{abs, expm1, sign}
+
+    // x = sign(v) * log1p(abs(v) * quantizedSizeT) / quantizedSizeLog1pT
+    // expm1(abs(x) * quantizedSizeLog1pT)*sign(x) = v
+    sign(v) * expm1(abs(v) * quantizedSizeLog1pT) / quantizedSizeT
+  }
+
   // in is (-1.0, 1.0)
   // out is [0, 256)
   def quantizedT(v: Tensor[Float]): Tensor[Int] = {
     TOps.Math.floor(v * 128.0f + 127.5f).toInt
   }
 
+  def quantizedO(v: Output[Float]): Output[Int] = {
+    OOps.Math.floor(v * 128.0f + 127.5f).toInt
+  }
+
   def quantizedOneHotT(v: Tensor[Int]): Tensor[Float] = {
     Tensor.oneHot(v, 256, 1.0f, 0.0f)
   }
 
-  def input(v: Tensor[Float]): Tensor[Float] = {
+  def quantizedOneHotO(v: Output[Int]): Output[Float] = {
+    OOps.Basic.oneHot(v, 256, 1.0f, 0.0f)
+  }
+
+  def inputT(v: Tensor[Float]): Tensor[Float] = {
     quantizedOneHotT(quantizedT(muLawCompandingT(v)))
+  }
+
+  def inputO(v: Output[Float]): Output[Float] = {
+    quantizedOneHotO(quantizedO(muLawCompandingO(v)))
   }
 
   def deQuantizedOneHotT(v: Tensor[Float]): Tensor[Long] = {
     TOps.Math.argmax(v, -1)
   }
 
+  def deQuantizedOneHotO(v: Output[Float]): Output[Long] = {
+    OOps.Math.argmax(v, -1, INT64)
+  }
+
   def deQuantizedT(v: Tensor[Long]): Tensor[Float] = {
     (v.toFloat - 127.5f)/128f
   }
 
-  def output(v: Tensor[Float]): Tensor[Float] = {
+  def deQuantizedO(v: Output[Long]): Output[Float] = {
+    (v.toFloat - 127.5f)/128f
+  }
+
+  def outputT(v: Tensor[Float]): Tensor[Float] = {
     muLawCompandingInverseT(deQuantizedT(deQuantizedOneHotT(v)))
+  }
+
+  def outputO(v: Output[Float]): Output[Float] = {
+    muLawCompandingInverseO(deQuantizedO(deQuantizedOneHotO(v)))
   }
 }
 
@@ -123,6 +155,11 @@ final object Transform {
     val y = quantizedT(muLawCompandingTable.y)
   }
 
+  def sineIdentityTest = {
+    val transformedInput = Transform.audioTransforms.inputT(TestAmplitudes.sineWave1CyclePer512)
+    Transform.audioTransforms.outputT(transformedInput)
+  }
+
   val testAmplitudes = new {
     val a0 = 0.0f
     val a1 = 1.0f
@@ -130,14 +167,6 @@ final object Transform {
     val a3 = 0.5f
     val a4 = -0.5f
     val all = Tensor(a0, a1, a2, a3, a4)
-  }
-
-  def muLawCompandingTestOut: Tensor[Float] = {
-    muLawCompandingT(testAmplitudes.all)
-  }
-
-  def oneHotTestOut: Tensor[Float] = {
-    quantizedOneHotT(quantizedT(muLawCompandingTestOut))
   }
 
   val muLawTestIn = Output.placeholder[Float](name = "normalizedAmplitude",
@@ -158,5 +187,19 @@ final object Transform {
     val session = core.client.Session()
     val List(out) = session.run(feeds = muLawTestFeeds, fetches = muLawTestFetches)
     out
+  }
+
+  def sineIdentityRun = {
+    val in = Output.placeholder[Float](name = "waveform",
+                                       shape = Shape(512))
+    val feeds = in -> (TestAmplitudes.sineWave1CyclePer512: Tensor[Float])
+
+    val graph = {
+      import audioTransforms._
+      outputO(inputO(in))
+    }
+
+    val session = core.client.Session()
+    session.run(feeds = feeds, fetches = graph)
   }
 }
