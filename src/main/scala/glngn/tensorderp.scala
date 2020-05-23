@@ -3,22 +3,26 @@ package glngn.tensorderp
 import org.platanios.tensorflow.api.{ops => OOps, _}
 import tensors.{ ops => TOps }
 import de.sciss.synth.{ io => audioIO }
-import java.lang.Math
+import java.lang.{Math => JavaMath}
 
 final object TestAmplitudes {
-  val allZeros = Stream.fill[Float](512)(0f)
-  val sineWave1CyclePer512 = (0 until 512).toStream map { i =>
-    val r: Double = (i.toDouble / 512.0) * 2.0 * Math.PI
-    Math.sin(r).toFloat
+  val frameSize = 512
+
+  val allZeros = Stream.fill[Float](frameSize)(0f)
+
+  val sineWave1CyclePer512 = (0 until frameSize).toStream map { i =>
+    val r: Double = (i.toDouble / frameSize.toFloat) * 2.0 * JavaMath.PI
+    JavaMath.sin(r).toFloat
   }
-  val indices512 = (0 until 512).toSeq
+
+  val indices512 = (0 until frameSize).toSeq
 }
 
 // tensor is ordered oldest to newest left to right.
 // at 0 is the oldest
 // at -1 is the newest
-class TensorAudioIterator(amplitudes: Stream[Float], size: Int = 512) {
-  val initial = Tensor.zeros[Float](Shape(size))
+class TensorAudioIterator(amplitudes: Stream[Float], frameSize: Int = 512) {
+  val initial = Tensor.zeros[Float](Shape(frameSize))
   private var prev: Option[Tensor[Float]] = None
   private val nextAmplitude: Iterator[Float] = amplitudes.toIterator
 
@@ -47,7 +51,7 @@ final object TestAudioIterators {
   def sine = new TensorAudioIterator(TestAmplitudes.sineWave1CyclePer512, 512)
 }
 
-class QuantizedAudioTransforms(quantizedSize: Int = 255) {
+class QuantizedAudioTransforms(val quantizedSize: Int = 256) {
   val quantizedSizeT = quantizedSize.toFloat: Tensor[Float]
   val quantizedSizeO = quantizedSize.toFloat: Output[Float]
   val quantizedSizeLog1pT = {
@@ -92,19 +96,19 @@ class QuantizedAudioTransforms(quantizedSize: Int = 255) {
   // in is (-1.0, 1.0)
   // out is [0, 256)
   def quantizedT(v: Tensor[Float]): Tensor[Int] = {
-    TOps.Math.floor(v * 128.0f + 127.5f).toInt
+    TOps.Math.floor(v * (quantizedSize.toFloat / 2f) + (quantizedSize.toFloat / 2f - 0.5f)).toInt
   }
 
   def quantizedO(v: Output[Float]): Output[Int] = {
-    OOps.Math.floor(v * 128.0f + 127.5f).toInt
+    OOps.Math.floor(v * (quantizedSize.toFloat / 2f) + (quantizedSize.toFloat / 2f - 0.5f)).toInt
   }
 
   def quantizedOneHotT(v: Tensor[Int]): Tensor[Float] = {
-    Tensor.oneHot(v, 256, 1.0f, 0.0f)
+    Tensor.oneHot(v, quantizedSize, 1.0f, 0.0f)
   }
 
   def quantizedOneHotO(v: Output[Int]): Output[Float] = {
-    OOps.Basic.oneHot(v, 256, 1.0f, 0.0f)
+    OOps.Basic.oneHot(v, quantizedSize, 1.0f, 0.0f)
   }
 
   def inputT(v: Tensor[Float]): Tensor[Float] = {
@@ -124,11 +128,11 @@ class QuantizedAudioTransforms(quantizedSize: Int = 255) {
   }
 
   def deQuantizedT(v: Tensor[Long]): Tensor[Float] = {
-    (v.toFloat - 127.5f)/128f
+    (v.toFloat - (quantizedSize.toFloat / 2f - 0.5f))/(quantizedSize.toFloat / 2f)
   }
 
   def deQuantizedO(v: Output[Long]): Output[Float] = {
-    (v.toFloat - 127.5f)/128f
+    (v.toFloat - (quantizedSize.toFloat / 2f - 0.5f))/(quantizedSize.toFloat / 2f)
   }
 
   def outputT(v: Tensor[Float]): Tensor[Float] = {
@@ -140,7 +144,68 @@ class QuantizedAudioTransforms(quantizedSize: Int = 255) {
   }
 }
 
-final object Transform {
+class ConcatDense(frameSize: Int = 512, quantizedSize: Int = 256) {
+  import OOps._
+
+  val weights = tf.variable[Float]("output-weights",
+                                    Shape(quantizedSize, frameSize*quantizedSize),
+                                    tf.ZerosInitializer)
+
+  def flatten(v: Output[Float]): Output[Float] =
+    Basic.reshape(v, Tensor(frameSize * quantizedSize))
+
+  def op(v: Output[Float]): Output[Float] = {
+    val flattened = flatten(v)
+
+    Math.sigmoid(Math.tensorDot(weights, flattened, 1))
+  }
+}
+
+case class TrainResult(out: Tensor[Float],
+                       loss: Tensor[Float])
+
+class IteratedTrainSession(frameSize: Int = 512, quantizedSize: Int = 256) {
+  // immutable
+  val audioTransforms = new QuantizedAudioTransforms(quantizedSize)
+  val outLayer = new ConcatDense(frameSize, quantizedSize)
+
+  // mutated by side effects
+  var audioIterator = new TensorAudioIterator(TestAmplitudes.sineWave1CyclePer512, frameSize)
+  val session = core.client.Session()
+
+  val inWaveform = Output.placeholder[Float](name = "input-waveform",
+                                             shape = Shape(512))
+  val actualWaveform = Output.placeholder[Float](name = "actual-waveform",
+                                                 shape = Shape(512))
+  val input = audioTransforms.inputO(inWaveform)
+  val outputSample = audioTransforms.outputO(outLayer.op(input))
+
+  val loss = tf.sum(tf.square(tf.subtract(outputSample, actualWaveform(-1))))
+  val optimizer = tf.train.AdaGrad().minimize(loss)
+
+  val fetches = Seq(outputSample, loss)
+
+  session.run(targets = tf.globalVariablesInitializer())
+  def step: TrainResult = {
+    val nextWaveform = audioIterator.next match {
+      case None => {
+        var audioIterator = new TensorAudioIterator(TestAmplitudes.sineWave1CyclePer512, frameSize)
+        audioIterator.next.get
+      }
+      case Some(nextWaveform) => nextWaveform
+    }
+
+    val feeds = Map(
+      inWaveform -> nextWaveform,
+      actualWaveform -> nextWaveform
+    )
+
+    val Seq(nextOut, currentLoss) = session.run(feeds = feeds, fetches = Seq(outputSample, loss), targets = optimizer)
+    TrainResult(nextOut, currentLoss)
+  }
+}
+
+final object Main {
   val audioTransforms = new QuantizedAudioTransforms()
   import audioTransforms._
 
@@ -156,8 +221,8 @@ final object Transform {
   }
 
   def sineIdentityTest = {
-    val transformedInput = Transform.audioTransforms.inputT(TestAmplitudes.sineWave1CyclePer512)
-    Transform.audioTransforms.outputT(transformedInput)
+    val transformedInput = inputT(TestAmplitudes.sineWave1CyclePer512)
+    outputT(transformedInput)
   }
 
   val testAmplitudes = new {
@@ -195,11 +260,28 @@ final object Transform {
     val feeds = in -> (TestAmplitudes.sineWave1CyclePer512: Tensor[Float])
 
     val graph = {
-      import audioTransforms._
       outputO(inputO(in))
     }
 
     val session = core.client.Session()
+    session.run(feeds = feeds, fetches = graph)
+  }
+
+  def singleLayerSineIdentityRun = {
+    val in = Output.placeholder[Float](name = "waveform",
+                                       shape = Shape(512))
+    val feeds = in -> (TestAmplitudes.sineWave1CyclePer512: Tensor[Float])
+
+    val graph = {
+      val frameSize = TestAmplitudes.frameSize
+
+      val input = inputO(in)
+      val outLayer = new ConcatDense(frameSize, quantizedSize)
+      outputO(outLayer.op(input))
+    }
+
+    val session = core.client.Session()
+    session.run(targets = tf.globalVariablesInitializer())
     session.run(feeds = feeds, fetches = graph)
   }
 }
