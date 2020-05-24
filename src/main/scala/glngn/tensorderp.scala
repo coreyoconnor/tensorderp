@@ -22,28 +22,65 @@ final object TestAmplitudes {
 // at 0 is the oldest
 // at -1 is the newest
 class TensorAudioIterator(amplitudes: Stream[Float], frameSize: Int = 512) {
-  val initial = Tensor.zeros[Float](Shape(frameSize))
-  private var prev: Option[Tensor[Float]] = None
+  val zeros = Tensor.zeros[Float](Shape(frameSize))
+
+  sealed trait State
+  object State {
+    case object Initial extends State
+    case class Forwarding(prior: Tensor[Float]) extends State
+    case class Tail(prior: Tensor[Float], remaining: Int = 0) extends State
+    case object Done extends State
+  }
+  private var state: State = State.Initial
   private val nextAmplitude: Iterator[Float] = amplitudes.toIterator
 
-  def next: Option[Tensor[Float]] = {
-    val nextPrev = prev match {
-      case _ if !nextAmplitude.hasNext => None
-      case None => Some(initial)
-      case Some(prevT) => {
-        var sample = nextAmplitude.next
-        // eh, close enough
-        if (sample <= -1.0)
-          sample = -0.999999f
-        if (sample >= 1.0)
-          sample = 0.999999f
+  def sample: Float = {
+    var out = nextAmplitude.next
+    // eh, close enough
+    if (out <= -1.0)
+      out = -0.999999f
+    if (out >= 1.0)
+      out = 0.999999f
+    out
+  }
 
-        val out = TOps.Basic.concatenate(Seq(prevT(1 ::), Tensor(sample)), 0)
-        Some(out)
+  def next: Option[Tensor[Float]] = {
+    val (out, nextState) = state match {
+      case State.Initial => {
+        (Some(zeros), State.Forwarding(zeros))
+      }
+
+      case State.Forwarding(prior) =>
+        if (nextAmplitude.hasNext) {
+          val out = TOps.Basic.concatenate(Seq(prior(1 ::), Tensor(sample)), 0)
+          (Some(out), State.Forwarding(out))
+        } else {
+          //val out = TOps.Basic.concatenate(Seq(prior(1 ::), Tensor(0.0f)), 0)
+          //(Some(out), State.Tail(out))
+          (None, State.Done)
+        }
+
+      case State.Tail(prior, 0) => (None, State.Done)
+
+      case State.Tail(prior, n) => {
+        val out = TOps.Basic.concatenate(Seq(prior(1 ::), Tensor(0.0f)), 0)
+        (Some(out), State.Tail(out, n - 1))
+      }
+      case State.Done => (None, State.Done)
+    }
+    state = nextState
+    out
+  }
+
+  def batchedNext(batchSize: Int): Option[Seq[Tensor[Float]]] = {
+    val out = collection.mutable.Buffer.empty[Tensor[Float]]
+    for(i <- 0 until batchSize) {
+      next match {
+        case None => ()
+        case Some(t) => out += t
       }
     }
-    prev = nextPrev
-    prev
+    if (out.size != batchSize) None else Some(out.toSeq)
   }
 }
 
@@ -152,19 +189,19 @@ class ConcatDense(frameSize: Int = 512, quantizedSize: Int = 256) {
                                     tf.ZerosInitializer)
 
   def flatten(v: Output[Float]): Output[Float] =
-    Basic.reshape(v, Tensor(frameSize * quantizedSize))
+    Basic.reshape(v, Tensor(-1, frameSize * quantizedSize))
 
   def op(v: Output[Float]): Output[Float] = {
     val flattened = flatten(v)
-
-    Math.sigmoid(Math.tensorDot(weights, flattened, 1))
+    //tf.softmax(Math.tensorDot(flattened, weights, Seq(-1), Seq(1)))
+    Math.tensorDot(flattened, weights, Seq(-1), Seq(1))
   }
 }
 
 case class TrainResult(out: Tensor[Float],
                        loss: Tensor[Float])
 
-class IteratedTrainSession(frameSize: Int = 512, quantizedSize: Int = 256) {
+class IteratedTrainSession(batchSize: Int = 32, frameSize: Int = 512, quantizedSize: Int = 256) {
   // immutable
   val audioTransforms = new QuantizedAudioTransforms(quantizedSize)
   val outLayer = new ConcatDense(frameSize, quantizedSize)
@@ -174,34 +211,34 @@ class IteratedTrainSession(frameSize: Int = 512, quantizedSize: Int = 256) {
   val session = core.client.Session()
 
   val inWaveform = Output.placeholder[Float](name = "input-waveform",
-                                             shape = Shape(512))
+                                             shape = Shape(batchSize, frameSize, quantizedSize))
   val actualWaveform = Output.placeholder[Float](name = "actual-waveform",
-                                                 shape = Shape(512))
-  val input = audioTransforms.inputO(inWaveform)
-  val outputSample = audioTransforms.outputO(outLayer.op(input))
+                                                 shape = Shape(batchSize, frameSize, quantizedSize))
+  val outputSample = outLayer.op(inWaveform)
 
-  val loss = tf.sum(tf.square(tf.subtract(outputSample, actualWaveform(-1))))
-  val optimizer = tf.train.AdaGrad().minimize(loss)
+  val loss = tf.mean(tf.softmaxCrossEntropy(outputSample, actualWaveform(---, -1, ::)))
+  val optimizer = tf.train.AdaGrad(0.01f).minimize(loss)
 
   val fetches = Seq(outputSample, loss)
 
   session.run(targets = tf.globalVariablesInitializer())
+
   def step: TrainResult = {
-    val nextWaveform = audioIterator.next match {
+    val next = audioIterator.batchedNext(batchSize) match {
       case None => {
-        var audioIterator = new TensorAudioIterator(TestAmplitudes.sineWave1CyclePer512, frameSize)
-        audioIterator.next.get
+        audioIterator = new TensorAudioIterator(TestAmplitudes.sineWave1CyclePer512, frameSize)
+        audioIterator.batchedNext(batchSize).get
       }
-      case Some(nextWaveform) => nextWaveform
+      case Some(next) => next
     }
 
     val feeds = Map(
-      inWaveform -> nextWaveform,
-      actualWaveform -> nextWaveform
+      inWaveform -> audioTransforms.inputT(next: Tensor[Float]),
+      actualWaveform -> audioTransforms.inputT(next: Tensor[Float])
     )
 
     val Seq(nextOut, currentLoss) = session.run(feeds = feeds, fetches = Seq(outputSample, loss), targets = optimizer)
-    TrainResult(nextOut, currentLoss)
+    TrainResult(audioTransforms.outputT(nextOut), currentLoss)
   }
 }
 
@@ -268,13 +305,12 @@ final object Main {
   }
 
   def singleLayerSineIdentityRun = {
+    val frameSize = TestAmplitudes.frameSize
     val in = Output.placeholder[Float](name = "waveform",
-                                       shape = Shape(512))
-    val feeds = in -> (TestAmplitudes.sineWave1CyclePer512: Tensor[Float])
+                                       shape = Shape(2, frameSize))
+    val feeds = in -> Tensor(TestAmplitudes.allZeros, TestAmplitudes.sineWave1CyclePer512: Tensor[Float])
 
     val graph = {
-      val frameSize = TestAmplitudes.frameSize
-
       val input = inputO(in)
       val outLayer = new ConcatDense(frameSize, quantizedSize)
       outputO(outLayer.op(input))
