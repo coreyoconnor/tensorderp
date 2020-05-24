@@ -37,10 +37,10 @@ class TensorAudioIterator(amplitudes: Stream[Float], frameSize: Int = 512) {
   def sample: Float = {
     var out = nextAmplitude.next
     // eh, close enough
-    if (out <= -1.0)
-      out = -0.999999f
-    if (out >= 1.0)
-      out = 0.999999f
+    if (out <= -1.0f)
+      out = -1.0f
+    if (out >= 1.0f)
+      out = 1.0f
     out
   }
 
@@ -133,11 +133,11 @@ class QuantizedAudioTransforms(val quantizedSize: Int = 256) {
   // in is (-1.0, 1.0)
   // out is [0, 256)
   def quantizedT(v: Tensor[Float]): Tensor[Int] = {
-    TOps.Math.floor(v * (quantizedSize.toFloat / 2f) + (quantizedSize.toFloat / 2f - 0.5f)).toInt
+    TOps.Math.floor(v * (quantizedSize.toFloat / 2f - 0.5f) + (quantizedSize.toFloat / 2f)).toInt
   }
 
   def quantizedO(v: Output[Float]): Output[Int] = {
-    OOps.Math.floor(v * (quantizedSize.toFloat / 2f) + (quantizedSize.toFloat / 2f - 0.5f)).toInt
+    OOps.Math.floor(v * (quantizedSize.toFloat / 2f - 0.5f) + (quantizedSize.toFloat / 2f)).toInt
   }
 
   def quantizedOneHotT(v: Tensor[Int]): Tensor[Float] = {
@@ -193,7 +193,6 @@ class ConcatDense(frameSize: Int = 512, quantizedSize: Int = 256) {
 
   def op(v: Output[Float]): Output[Float] = {
     val flattened = flatten(v)
-    //tf.softmax(Math.tensorDot(flattened, weights, Seq(-1), Seq(1)))
     Math.tensorDot(flattened, weights, Seq(-1), Seq(1))
   }
 }
@@ -201,7 +200,7 @@ class ConcatDense(frameSize: Int = 512, quantizedSize: Int = 256) {
 case class TrainResult(out: Tensor[Float],
                        loss: Tensor[Float])
 
-class IteratedTrainSession(batchSize: Int = 32, frameSize: Int = 512, quantizedSize: Int = 256) {
+class IteratedTrainSession(batchSize: Int = 64, frameSize: Int = 512, quantizedSize: Int = 256) {
   // immutable
   val audioTransforms = new QuantizedAudioTransforms(quantizedSize)
   val outLayer = new ConcatDense(frameSize, quantizedSize)
@@ -216,7 +215,7 @@ class IteratedTrainSession(batchSize: Int = 32, frameSize: Int = 512, quantizedS
                                                  shape = Shape(batchSize, frameSize, quantizedSize))
   val outputSample = outLayer.op(inWaveform)
 
-  val loss = tf.mean(tf.softmaxCrossEntropy(outputSample, actualWaveform(---, -1, ::)))
+  val loss = tf.mean(tf.softmaxCrossEntropy(outputSample, actualWaveform(::, -1, ::)))
   val optimizer = tf.train.AdaGrad(0.01f).minimize(loss)
 
   val fetches = Seq(outputSample, loss)
