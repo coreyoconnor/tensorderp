@@ -5,38 +5,44 @@ import tensors.{ ops => TOps }
 import de.sciss.synth.{ io => audioIO }
 import java.lang.{Math => JavaMath}
 
-final object TestAmplitudes {
-  val frameSize = 512
+class TestData(val frameSize: Int = 512) {
+  val zeros = Stream.fill[Float](frameSize)(0f)
 
-  val allZeros = Stream.fill[Float](frameSize)(0f)
-
-  val sineWave1CyclePer512 = (0 until frameSize).toStream map { i =>
+  val oneSineCycle = (0 until frameSize).toStream map { i =>
     val r: Double = (i.toDouble / frameSize.toFloat) * 2.0 * JavaMath.PI
     JavaMath.sin(r).toFloat
   }
 
-  val indices512 = (0 until frameSize).toSeq
+  val indices = (0 until frameSize).toSeq
 }
 
-// tensor is ordered oldest to newest left to right.
-// at 0 is the oldest
-// at -1 is the newest
-class TensorAudioIterator(amplitudes: Stream[Float], frameSize: Int = 512) {
+final object TestData extends TestData(frameSize = 512)
+
+/** tensor is ordered oldest to newest left to right.
+  * at 0 is the oldest
+  * at -1 is the newest
+  * always starts with frameSize zero samples.
+  * if zeroTail then a frameSize zero samples follow after amplitudes.
+  */
+class TensorAudioIterator(amplitudes: Stream[Float],
+                          val frameSize: Int = 512,
+                          val zeroTail: Boolean = false) {
+
   val zeros = Tensor.zeros[Float](Shape(frameSize))
 
   sealed trait State
   object State {
     case object Initial extends State
     case class Forwarding(prior: Tensor[Float]) extends State
-    case class Tail(prior: Tensor[Float], remaining: Int = 0) extends State
+    case class Tail(prior: Tensor[Float], remaining: Int = frameSize) extends State
     case object Done extends State
   }
   private var state: State = State.Initial
   private val nextAmplitude: Iterator[Float] = amplitudes.toIterator
 
-  def sample: Float = {
+  private def nextSample: Float = {
     var out = nextAmplitude.next
-    // eh, close enough
+    // can't trust anything to provide wave data in properly normalized floats
     if (out <= -1.0f)
       out = -1.0f
     if (out >= 1.0f)
@@ -44,20 +50,31 @@ class TensorAudioIterator(amplitudes: Stream[Float], frameSize: Int = 512) {
     out
   }
 
+  /** Out is Shape(frameSize)
+    */
   def next: Option[Tensor[Float]] = {
     val (out, nextState) = state match {
-      case State.Initial => {
-        (Some(zeros), State.Forwarding(zeros))
+      case State.Initial => if (nextAmplitude.hasNext) {
+        val out = TOps.Basic.concatenate(Seq(zeros(1 ::), Tensor(nextSample)), 0)
+        (Some(out), State.Forwarding(out))
+      } else {
+        if (zeroTail)
+          (Some(zeros), State.Tail(zeros))
+        else
+          (None, State.Done)
       }
 
       case State.Forwarding(prior) =>
         if (nextAmplitude.hasNext) {
-          val out = TOps.Basic.concatenate(Seq(prior(1 ::), Tensor(sample)), 0)
+          val out = TOps.Basic.concatenate(Seq(prior(1 ::), Tensor(nextSample)), 0)
           (Some(out), State.Forwarding(out))
         } else {
-          //val out = TOps.Basic.concatenate(Seq(prior(1 ::), Tensor(0.0f)), 0)
-          //(Some(out), State.Tail(out))
-          (None, State.Done)
+          if (zeroTail) {
+            val out = TOps.Basic.concatenate(Seq(prior(1 ::), Tensor(0.0f)), 0)
+            (Some(out), State.Tail(out))
+          } else {
+            (None, State.Done)
+          }
         }
 
       case State.Tail(prior, 0) => (None, State.Done)
@@ -72,6 +89,9 @@ class TensorAudioIterator(amplitudes: Stream[Float], frameSize: Int = 512) {
     out
   }
 
+  /** out is equiv to Shape(batchSize, frameSize)
+    * truncates any partial batch
+    */
   def batchedNext(batchSize: Int): Option[Seq[Tensor[Float]]] = {
     val out = collection.mutable.Buffer.empty[Tensor[Float]]
     for(i <- 0 until batchSize) {
@@ -80,12 +100,15 @@ class TensorAudioIterator(amplitudes: Stream[Float], frameSize: Int = 512) {
         case Some(t) => out += t
       }
     }
-    if (out.size != batchSize) None else Some(out.toSeq)
+    if (out.size != batchSize) {
+      println("trunacatingingn")
+      None
+    } else Some(out.toSeq)
   }
 }
 
 final object TestAudioIterators {
-  def sine = new TensorAudioIterator(TestAmplitudes.sineWave1CyclePer512, 512)
+  def sine = new TensorAudioIterator(TestData.oneSineCycle, 512)
 }
 
 class QuantizedAudioTransforms(val quantizedSize: Int = 256) {
@@ -185,15 +208,19 @@ class ConcatDense(frameSize: Int = 512, quantizedSize: Int = 256) {
   import OOps._
 
   val weights = tf.variable[Float]("output-weights",
-                                    Shape(quantizedSize, frameSize*quantizedSize),
-                                    tf.ZerosInitializer)
+                                   Shape(quantizedSize, frameSize*quantizedSize),
+                                   tf.ZerosInitializer)
+
+  val bias = tf.variable[Float]("output-bias",
+                                Shape(quantizedSize),
+                                tf.ZerosInitializer)
 
   def flatten(v: Output[Float]): Output[Float] =
     Basic.reshape(v, Tensor(-1, frameSize * quantizedSize))
 
   def op(v: Output[Float]): Output[Float] = {
     val flattened = flatten(v)
-    Math.tensorDot(flattened, weights, Seq(-1), Seq(1))
+    Math.tensorDot(flattened, weights, Seq(-1), Seq(1)) + bias
   }
 }
 
@@ -206,7 +233,9 @@ class IteratedTrainSession(batchSize: Int = 64, frameSize: Int = 512, quantizedS
   val outLayer = new ConcatDense(frameSize, quantizedSize)
 
   // mutated by side effects
-  var audioIterator = new TensorAudioIterator(TestAmplitudes.sineWave1CyclePer512, frameSize)
+  val testData = new TestData(frameSize)
+  def freshAudioIterator = new TensorAudioIterator(testData.oneSineCycle, frameSize)
+  var audioIterator = freshAudioIterator
   val session = core.client.Session()
 
   val inWaveform = Output.placeholder[Float](name = "input-waveform",
@@ -215,7 +244,7 @@ class IteratedTrainSession(batchSize: Int = 64, frameSize: Int = 512, quantizedS
                                                  shape = Shape(batchSize, frameSize, quantizedSize))
   val outputSample = outLayer.op(inWaveform)
 
-  val loss = tf.mean(tf.softmaxCrossEntropy(outputSample, actualWaveform(::, -1, ::)))
+  val loss = tf.sum(tf.softmaxCrossEntropy(outputSample, actualWaveform(::, -1, ::)))
   val optimizer = tf.train.AdaGrad(0.01f).minimize(loss)
 
   val fetches = Seq(outputSample, loss)
@@ -225,7 +254,7 @@ class IteratedTrainSession(batchSize: Int = 64, frameSize: Int = 512, quantizedS
   def step: TrainResult = {
     val next = audioIterator.batchedNext(batchSize) match {
       case None => {
-        audioIterator = new TensorAudioIterator(TestAmplitudes.sineWave1CyclePer512, frameSize)
+        audioIterator = freshAudioIterator
         audioIterator.batchedNext(batchSize).get
       }
       case Some(next) => next
@@ -236,7 +265,11 @@ class IteratedTrainSession(batchSize: Int = 64, frameSize: Int = 512, quantizedS
       actualWaveform -> audioTransforms.inputT(next: Tensor[Float])
     )
 
-    val Seq(nextOut, currentLoss) = session.run(feeds = feeds, fetches = Seq(outputSample, loss), targets = optimizer)
+    val Seq(nextOut, currentLoss) = session.run(
+      feeds = feeds,
+      fetches = Seq(outputSample, loss),
+      targets = optimizer
+    )
     TrainResult(audioTransforms.outputT(nextOut), currentLoss)
   }
 }
@@ -257,7 +290,7 @@ final object Main {
   }
 
   def sineIdentityTest = {
-    val transformedInput = inputT(TestAmplitudes.sineWave1CyclePer512)
+    val transformedInput = inputT(TestData.oneSineCycle)
     outputT(transformedInput)
   }
 
@@ -293,7 +326,7 @@ final object Main {
   def sineIdentityRun = {
     val in = Output.placeholder[Float](name = "waveform",
                                        shape = Shape(512))
-    val feeds = in -> (TestAmplitudes.sineWave1CyclePer512: Tensor[Float])
+    val feeds = in -> (TestData.oneSineCycle: Tensor[Float])
 
     val graph = {
       outputO(inputO(in))
@@ -304,10 +337,10 @@ final object Main {
   }
 
   def singleLayerSineIdentityRun = {
-    val frameSize = TestAmplitudes.frameSize
+    val frameSize = TestData.frameSize
     val in = Output.placeholder[Float](name = "waveform",
                                        shape = Shape(2, frameSize))
-    val feeds = in -> Tensor(TestAmplitudes.allZeros, TestAmplitudes.sineWave1CyclePer512: Tensor[Float])
+    val feeds = in -> Tensor(TestData.zeros, TestData.oneSineCycle: Tensor[Float])
 
     val graph = {
       val input = inputO(in)
