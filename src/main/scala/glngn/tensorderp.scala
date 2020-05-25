@@ -92,7 +92,7 @@ class TensorAudioIterator(amplitudes: Stream[Float],
   /** out is equiv to Shape(batchSize, frameSize)
     * truncates any partial batch
     */
-  def batchedNext(batchSize: Int): Option[Seq[Tensor[Float]]] = {
+  def nextBatch(batchSize: Int): Option[Seq[Tensor[Float]]] = {
     val out = collection.mutable.Buffer.empty[Tensor[Float]]
     for(i <- 0 until batchSize) {
       next match {
@@ -101,7 +101,6 @@ class TensorAudioIterator(amplitudes: Stream[Float],
       }
     }
     if (out.size != batchSize) {
-      println("trunacatingingn")
       None
     } else Some(out.toSeq)
   }
@@ -227,7 +226,9 @@ class ConcatDense(frameSize: Int = 512, quantizedSize: Int = 256) {
 case class TrainResult(out: Tensor[Float],
                        loss: Tensor[Float])
 
-class IteratedTrainSession(batchSize: Int = 64, frameSize: Int = 512, quantizedSize: Int = 256) {
+class IteratedTrainSession(val batchSize: Int = 64,
+                           val frameSize: Int = 512,
+                           val quantizedSize: Int = 256) {
   // immutable
   val audioTransforms = new QuantizedAudioTransforms(quantizedSize)
   val outLayer = new ConcatDense(frameSize, quantizedSize)
@@ -244,7 +245,7 @@ class IteratedTrainSession(batchSize: Int = 64, frameSize: Int = 512, quantizedS
                                                  shape = Shape(batchSize, frameSize, quantizedSize))
   val outputSample = outLayer.op(inWaveform)
 
-  val loss = tf.sum(tf.softmaxCrossEntropy(outputSample, actualWaveform(::, -1, ::)))
+  val loss = tf.mean(tf.softmaxCrossEntropy(outputSample, actualWaveform(::, -1, ::)))
   val optimizer = tf.train.AdaGrad(0.01f).minimize(loss)
 
   val fetches = Seq(outputSample, loss)
@@ -252,10 +253,10 @@ class IteratedTrainSession(batchSize: Int = 64, frameSize: Int = 512, quantizedS
   session.run(targets = tf.globalVariablesInitializer())
 
   def step: TrainResult = {
-    val next = audioIterator.batchedNext(batchSize) match {
+    val next = audioIterator.nextBatch(batchSize) match {
       case None => {
         audioIterator = freshAudioIterator
-        audioIterator.batchedNext(batchSize).get
+        audioIterator.nextBatch(batchSize).get
       }
       case Some(next) => next
     }
