@@ -5,6 +5,12 @@ import tensors.{ ops => TOps }
 import de.sciss.synth.{ io => audioIO }
 import java.lang.{Math => JavaMath}
 
+case class ProcessorDesc(
+  frameSize: Int = 512, /** samples per frame  */
+  rate: Int = 48000,    /** Samples per second */
+  quantizedSize: Int = 256
+)
+
 class TestData(val frameSize: Int = 512) {
   val zeros = Stream.fill[Float](frameSize)(0f)
 
@@ -26,6 +32,7 @@ final object TestData extends TestData(frameSize = 512)
   */
 class TensorAudioIterator(amplitudes: Stream[Float],
                           val frameSize: Int = 512,
+                          val zeroHead: Boolean = false,
                           val zeroTail: Boolean = false) {
 
   val zeros = Tensor.zeros[Float](Shape(frameSize))
@@ -38,11 +45,12 @@ class TensorAudioIterator(amplitudes: Stream[Float],
     case object Done extends State
   }
   private var state: State = State.Initial
-  private val nextAmplitude: Iterator[Float] = amplitudes.toIterator
+  private val amplitudeIter: Iterator[Float] = amplitudes.toIterator
 
   private def nextSample: Float = {
-    var out = nextAmplitude.next
+    var out = amplitudeIter.next
     // can't trust anything to provide wave data in properly normalized floats
+    // even if the provider says they do, probably incorrect
     if (out <= -1.0f)
       out = -1.0f
     if (out >= 1.0f)
@@ -54,8 +62,9 @@ class TensorAudioIterator(amplitudes: Stream[Float],
     */
   def next: Option[Tensor[Float]] = {
     val (out, nextState) = state match {
-      case State.Initial => if (nextAmplitude.hasNext) {
-        val out = TOps.Basic.concatenate(Seq(zeros(1 ::), Tensor(nextSample)), 0)
+      case State.Initial => if (amplitudeIter.hasNext) {
+        val s = nextSample
+        val out = TOps.Basic.concatenate(Seq(zeros(1 ::), Tensor(s)), 0)
         (Some(out), State.Forwarding(out))
       } else {
         if (zeroTail)
@@ -65,7 +74,7 @@ class TensorAudioIterator(amplitudes: Stream[Float],
       }
 
       case State.Forwarding(prior) =>
-        if (nextAmplitude.hasNext) {
+        if (amplitudeIter.hasNext) {
           val out = TOps.Basic.concatenate(Seq(prior(1 ::), Tensor(nextSample)), 0)
           (Some(out), State.Forwarding(out))
         } else {
