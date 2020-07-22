@@ -1,4 +1,4 @@
-package glngn.tensorderp
+package glngn.tensorderp.audio
 
 import org.platanios.tensorflow.api.{ops => OOps, _}
 import tensors.{ ops => TOps }

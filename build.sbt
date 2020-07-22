@@ -1,3 +1,7 @@
+val zio = Seq(
+  "dev.zio" %% "zio" % "1.0.0-RC21-2"
+)
+
 val tensorflow = Seq(
   "org.platanios" %% "tensorflow" % "0.4.1" classifier "linux-cpu-x86_64",
   "org.platanios" %% "tensorflow-data" % "0.4.1"
@@ -13,5 +17,5 @@ lazy val root = (project in file("."))
     organization := "glngn",
     version := "0.1.0-SNAPSHOT",
     scalaVersion := "2.12.10",
-    libraryDependencies ++= tensorflow ++ audiofile
+    libraryDependencies ++= tensorflow ++ audiofile ++ zio
   )
