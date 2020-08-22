@@ -30,12 +30,15 @@ object IceCreamMenuEx0 {
     val io = for {
       _ <- menu.provideCustomLayer(IceCreamMenu.recommender.fresh.toLayer)
       dist <- ZIO.foldLeft(0 to 1000)(Map.empty[String, Int]) { case (dist, _) =>
-        Recommender.recommend.map { flavor =>
-          dist.get(flavor) match {
-            case None => dist + (flavor -> 0)
-            case Some(c) => dist + (flavor -> (c + 1))
+        val withRecommender =  Recommender.update("more caramel") *>
+          Recommender.recommend map { flavor =>
+            dist.get(flavor) match {
+              case None => dist + (flavor -> 0)
+              case Some(c) => dist + (flavor -> (c + 1))
+            }
           }
-        }.provideCustomLayer(IceCreamMenu.recommender.fresh.toLayer)
+
+        withRecommender.provideCustomLayer(IceCreamMenu.recommender.fresh.toLayer)
       }
       _ <- console.putStrLn(s"distribution = ${dist.toList}")
     } yield ()
