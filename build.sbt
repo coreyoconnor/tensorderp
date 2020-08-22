@@ -1,5 +1,5 @@
 val zio = Seq(
-  "dev.zio" %% "zio" % "1.0.0-RC21-2"
+  "dev.zio" %% "zio" % "1.0.0"
 )
 
 val tensorflow = Seq(

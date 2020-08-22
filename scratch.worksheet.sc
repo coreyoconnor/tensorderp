@@ -1,15 +1,12 @@
-import $dep.`com.chuusai::shapeless:2.4.0-M1`
+import $ivy.`com.chuusai::shapeless:2.4.0-M1`
 import shapeless._
 
-println("ASDASD")
+import $ivy.`glngn::tensorderp:0.1.0-SNAPSHOT`
 
-1 + 1
+import glngn.tensorderp.minirec._
+import zio._
+
+
 object model {
-  object input
-  object variables
-  object output
-  object analysis
+  val x = 1
 }
-
-Generic[model.type]
-LabelledGeneric[model.type]

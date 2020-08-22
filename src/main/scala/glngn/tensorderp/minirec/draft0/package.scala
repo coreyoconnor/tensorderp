@@ -1,4 +1,4 @@
-package glngn.tensorderp.minirec
+package glngn.tensorderp.minirec.draft0
 
 import org.platanios.tensorflow.api._
 import zio._
@@ -27,7 +27,7 @@ object IceCreamMenuEx0 {
       _ <- Recommender.update("caramel")
     } yield()
 
-    val io = menu.provideCustomLayer(IceCreamMenu.recommender.fresh.toLayer)
+    val io = menu.provideCustomLayer(IceCreamMenu.recommender.fresh)
 
     Runtime.default.unsafeRun(io)
   }
@@ -40,15 +40,20 @@ object Recommender {
   def update(actual: String): ZIO[Has[Service], Throwable, Unit] =
     ZIO.service[Recommender.Service].flatMap(_.update(actual))
 
+  def impl: ZIO[Has[Service], Nothing, Impl] =
+    ZIO.service[Recommender.Service].map(_.impl)
+
   trait Service {
     def recommend: IO[Throwable, String]
     def update(actual: String): IO[Throwable, Unit]
+    val impl: Impl
   }
 
-  trait Model {
-    val inputs: {
-      val expected: Output[Int]
-    }
+  trait Impl {
+    val session: Session
+    val graph: Graph
+
+    val inputs: {}
 
     val variables: {
       val estimatedDist: Variable[Float]
@@ -56,23 +61,19 @@ object Recommender {
 
     val outputs: {
       val choice: Output[Int]
-      val loss: Output[Float]
+      def loss(expected: Int): Output[Float]
     }
   }
 }
 
 class Recommender(choices: Seq[String]) {
-  def fresh: ZManaged[Any, Throwable, Recommender.Service] = {
-    val impl = ZManaged.make(acquireFresh)(releaseFresh)
-    impl.map(impl => impl: Recommender.Service)
-  }
+  def fresh: Layer[Throwable, Has[Recommender.Service]] =
+    ZLayer.fromAcquireRelease(acquireFreshSession)(releaseSession)
 
-  def buildModel(graph: Graph): Task[Recommender.Model] = Task {
-    tf.createWith(graph) {
-      new Recommender.Model {
-        val inputs = new {
-          val expected = Output.placeholder[Int](Shape(1))
-        }
+  def acquireImpl: Task[Recommender.Impl] = Task {
+    tf.createWith(Graph()) {
+      new Recommender.Impl {
+        object inputs
 
         val variables = new {
           val estimatedDist = tf.variable[Float]("estimatedDist",
@@ -85,44 +86,41 @@ class Recommender(choices: Seq[String]) {
 
           val choice = tf.argmax(estimatedDist, 0, INT32)
 
-          val loss: Output[Float] = {
-            val expectedDist = tf.oneHot(inputs.expected, choices.size, 1f, 0f)
+          def loss(expected: Int): Output[Float] = {
+            val expectedDist = tf.oneHot(expected, choices.size, 1f, 0f)
             tf.mean(tf.softmaxCrossEntropy(estimatedDist, expectedDist))
           }
         }
+
+        val graph = tf.currentGraph
+        val session = core.client.Session(graph)
+        session.run(targets = tf.globalVariablesInitializer())
       }
     }
   }
 
-  sealed abstract class TFService extends Recommender.Service {
-    val session: Session
+  def releaseImpl: Recommender.Impl => UIO[_] = { impl =>
+    UIO(impl.session.close)
   }
 
-  val acquireFresh: Task[TFService] = for {
-    recommenderGraph <- Task(Graph())
-    model <- buildModel(recommenderGraph)
+  val acquireFreshSession: Task[Recommender.Service] = for {
+    acquiredImpl <- acquireImpl
     optimizer <- Task(ops.training.optimizers.GradientDescent(learningRate = 0.1f))
-  } yield new TFService {
-    val session = core.client.Session(recommenderGraph)
-
-    tf.createWith(recommenderGraph) {
-      session.run(targets = tf.globalVariablesInitializer())
-    }
+  } yield new Recommender.Service {
+    val impl = acquiredImpl
 
     def recommend: Task[String] = Task {
-      val predictedChoice: Int = session.run(fetches = model.outputs.choice).scalar
+      val predictedChoice: Int = impl.session.run(fetches = impl.outputs.choice).scalar
       choices(predictedChoice)
     }
 
     def update(actual: String): Task[Unit] =  Task {
       val expectedIndex = choices.indexOf(actual)
-      tf.createWith(recommenderGraph) {
-        val updates = optimizer.minimize(model.outputs.loss)
-        session.run(feeds = (model.inputs.expected -> (expectedIndex: Tensor[Int])),
-                    targets = updates)
-      }
+      val loss = impl.outputs.loss(expectedIndex)
+      val updates = optimizer.minimize(loss)
+      impl.session.run(targets = updates)
     }
   }
 
-  def releaseFresh(recommender: TFService) = UIO(recommender.session.close())
+  def releaseSession(recommender: Recommender.Service) = releaseImpl(recommender.impl)
 }
