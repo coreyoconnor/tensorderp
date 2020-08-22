@@ -25,9 +25,20 @@ object IceCreamMenuEx0 {
       recommendedFlavor <- Recommender.recommend
       _ <- console.putStrLn(s"choice [$recommendedFlavor]: ")
       _ <- Recommender.update("caramel")
-    } yield()
+    } yield ()
 
-    val io = menu.provideCustomLayer(IceCreamMenu.recommender.fresh.toLayer)
+    val io = for {
+      _ <- menu.provideCustomLayer(IceCreamMenu.recommender.fresh.toLayer)
+      dist <- ZIO.foldLeft(0 to 1000)(Map.empty[String, Int]) { case (dist, _) =>
+        Recommender.recommend.map { flavor =>
+          dist.get(flavor) match {
+            case None => dist + (flavor -> 0)
+            case Some(c) => dist + (flavor -> (c + 1))
+          }
+        }.provideCustomLayer(IceCreamMenu.recommender.fresh.toLayer)
+      }
+      _ <- console.putStrLn(s"distribution = ${dist.toList}")
+    } yield ()
 
     Runtime.default.unsafeRun(io)
   }
