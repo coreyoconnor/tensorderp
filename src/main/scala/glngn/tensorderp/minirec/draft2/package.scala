@@ -18,7 +18,7 @@ object IceCreamMenu {
   val recommender = new Recommender(choices)
 }
 
-object IceCreamMenuEx0 {
+object ConsoleIceCreamMenu {
   def main(args: Array[String]): Unit = {
     val menu = for {
       _ <- ZIO.foreach(IceCreamMenu.choices) { choice => console.putStrLn(s"- ${choice}") }
@@ -49,6 +49,10 @@ object IceCreamMenuEx0 {
   }
 }
 
+class Recommender(val choices: Seq[String]) {
+  def fresh = providers.tensorflow.fresh(this)
+}
+
 object Recommender {
   def recommend: ZIO[Has[Service], Throwable, String] =
     ZIO.service[Recommender.Service].flatMap(_.recommend)
@@ -60,86 +64,88 @@ object Recommender {
     def recommend: IO[Throwable, String]
     def update(actual: String): IO[Throwable, Unit]
   }
-
-  trait Model {
-    val inputs: {
-      val expected: Output[Int]
-    }
-
-    val variables: {
-      val estimatedDist: Variable[Float]
-    }
-
-    val outputs: {
-      val choice: Output[Int]
-      val loss: Output[Float]
-    }
-  }
 }
 
-class Recommender(choices: Seq[String]) {
-  def fresh: ZManaged[Any, Throwable, Recommender.Service] = {
-    val impl = ZManaged.make(TFService.acquireFresh)(TFService.releaseFresh)
-    impl.map(impl => impl: Recommender.Service)
-  }
+object providers {
+  object tensorflow {
+    trait Model {
+      val inputs: {
+        val expected: Output[Int]
+      }
 
-  abstract class TFService private (val graph: Graph) extends Recommender.Service {
-    val session = core.client.Session(graph)
-  }
+      val variables: {
+        val estimatedDist: Variable[Float]
+      }
 
-  object TFService {
-    def buildModel(graph: Graph): Task[Recommender.Model] = Task {
-      tf.createWith(graph) {
-        new Recommender.Model {
-          val inputs = new {
-            val expected = Output.placeholder[Int](Shape(1))
-          }
+      val outputs: {
+        val choice: Output[Int]
+        val loss: Output[Float]
+      }
+    }
 
-          val variables = new {
-            val estimatedDist = tf.variable[Float]("estimatedDist",
-                                                  Shape(choices.size),
-                                                  tf.RandomUniformInitializer())
-          }
+    sealed abstract class Service(val session: core.client.Session,
+                                  val model: Model)
+        extends Recommender.Service
 
-          val outputs = new {
-            val estimatedDist = variables.estimatedDist.toOutput
+    def fresh(recommender: Recommender): Managed[Throwable, Recommender.Service] = {
+      val impl = ZManaged.make(acquireFresh(recommender))(releaseFresh)
+      impl.map(impl => impl: Recommender.Service)
+    }
 
-            val choice = tf.argmax(estimatedDist, 0, INT32)
+    def buildModel(recommender: Recommender, graph: Graph): Model = tf.createWith(graph) {
+      import recommender.choices
 
-            val loss: Output[Float] = {
-              val expectedDist = tf.oneHot(inputs.expected, choices.size, 1f, 0f)
-              tf.mean(tf.softmaxCrossEntropy(estimatedDist, expectedDist))
-            }
+      new Model {
+        val inputs = new {
+          val expected = Output.placeholder[Int](Shape(1))
+        }
+
+        val variables = new {
+          val estimatedDist = tf.variable[Float]("estimatedDist",
+                                                Shape(choices.size),
+                                                tf.RandomUniformInitializer())
+        }
+
+        val outputs = new {
+          val estimatedDist = variables.estimatedDist.toOutput
+
+          val choice = tf.argmax(estimatedDist, 0, INT32)
+
+          val loss: Output[Float] = {
+            val expectedDist = tf.oneHot(inputs.expected, choices.size, 1f, 0f)
+            tf.mean(tf.softmaxCrossEntropy(estimatedDist, expectedDist))
           }
         }
       }
     }
 
-    val acquireFresh: Task[TFService] = for {
-      graph <- Task(Graph())
-      model <- buildModel(graph)
-      optimizer <- Task(ops.training.optimizers.GradientDescent(learningRate = 0.1f))
-    } yield new TFService(graph) {
+    def acquireFresh(recommender: Recommender): Task[Service] = Task {
+      val graph = Graph()
+      val model = buildModel(recommender, graph)
+      val optimizer = ops.training.optimizers.GradientDescent(learningRate = 0.1f)
+      val session = core.client.Session(graph)
 
       tf.createWith(graph) {
         session.run(targets = tf.globalVariablesInitializer())
       }
 
-      def recommend: Task[String] = Task {
-        val predictedChoice: Int = session.run(fetches = model.outputs.choice).scalar
-        choices(predictedChoice)
-      }
+      new Service(session, model) {
+        def recommend: Task[String] = Task {
+          val predictedChoice: Int = session.run(fetches = model.outputs.choice).scalar
+          recommender.choices(predictedChoice)
+        }
 
-      def update(actual: String): Task[Unit] =  Task {
-        val expectedIndex = choices.indexOf(actual)
-        tf.createWith(graph) {
-          val updates = optimizer.minimize(model.outputs.loss)
-          session.run(feeds = (model.inputs.expected -> (expectedIndex: Tensor[Int])),
-                      targets = updates)
+        def update(actual: String): Task[Unit] =  Task {
+          val expectedIndex = recommender.choices.indexOf(actual)
+          tf.createWith(graph) {
+            val updates = optimizer.minimize(model.outputs.loss)
+            session.run(feeds = (model.inputs.expected -> (expectedIndex: Tensor[Int])),
+                        targets = updates)
+          }
         }
       }
     }
 
-    def releaseFresh(recommender: TFService) = UIO(recommender.session.close())
+    def releaseFresh(service: Service) = UIO(service.session.close())
   }
 }
