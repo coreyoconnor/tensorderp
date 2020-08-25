@@ -10,7 +10,7 @@ import zio._
   * 3) caramel
   * 4) more caramel
   *
-  * choice [$recommendation]: ?
+  * choice: ?
   */
 object IceCreamMenu {
   type Flavor = String

@@ -11,11 +11,51 @@ import zio._
   * - caramel
   * - more caramel
   *
-  * choice: _
+  * choice [$recommended]: _
   */
 object IceCreamMenu {
   type Flavor = String
   val choices: List[Flavor] = List("chocolate", "vanilla", "caramel", "more caramel")
+  val recommender = new Recommender(choices)
+}
+
+class Recommender(val choices: List[String]) {
+  def fresh: Managed[Throwable, Recommender.Service] = providers.tensorflow.fresh(this)
+
+  def constant(i: Int): Managed[Throwable, Recommender.Service] =
+    providers.constant(i, this)
+
+  def random: Managed[Throwable, Recommender.Service] = ???
+}
+
+object Recommender {
+  def recommend: ZIO[Has[Service], Throwable, String] =
+    ZIO.service[Service].flatMap(_.recommend)
+
+  def update(actual: String): ZIO[Has[Service], Throwable, Unit] =
+    ZIO.service[Service].flatMap(_.update(actual))
+
+  trait Service {
+    def recommend: IO[Throwable, String]
+    def update(actual: String): IO[Throwable, Unit]
+  }
+}
+
+object providers {
+  def constant(i: Int, recommender: Recommender): Managed[Throwable, Recommender.Service] =
+    ZManaged.effect {
+      new Recommender.Service {
+        def recommend: IO[Throwable, String] = UIO {
+          recommender.choices.drop(i).head
+        }
+
+        def update(actual: String): IO[Throwable, Unit] = UIO.unit
+      }
+    }
+
+  object tensorflow {
+    def fresh(recommender: Recommender): Managed[Throwable, Recommender.Service] = ???
+  }
 }
 
 object ConsoleIceCreamMenu extends App {
@@ -25,10 +65,19 @@ object ConsoleIceCreamMenu extends App {
       _ <- ZIO.foreach(IceCreamMenu.choices) { choice =>
         console.putStrLn(s"- ${choice}")
       }
-      selectedFlavor <- console.putStr(s"choice: ") *> console.getStrLn
-      _ <- console.putStrLn(s"\nUser selected ${selectedFlavor}")
+      recommended <- Recommender.recommend
+      selectedFlavor <- {
+        console.putStr(s"choice [${recommended}]: ") *> console.getStrLn
+      }
+      actualFlavor <- if (selectedFlavor.isEmpty) {
+        UIO(recommended)
+      } else {
+        Recommender.update(selectedFlavor) *> UIO(selectedFlavor)
+      }
+      _ <- console.putStrLn(s"\nUser selected ${actualFlavor}")
     } yield ()
 
-    menu.exitCode
+    val recommenderLayer = IceCreamMenu.recommender.fresh.toLayer
+    menu.provideCustomLayer(recommenderLayer).exitCode
   }
 }
