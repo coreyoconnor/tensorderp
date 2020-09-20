@@ -1,10 +1,12 @@
+resolvers += "Sonatype OSS Snapshots" at "https://oss.sonatype.org/content/repositories/snapshots"
+
 val zio = Seq(
   "dev.zio" %% "zio" % "1.0.0"
 )
 
 val tensorflow = Seq(
-  "org.platanios" %% "tensorflow" % "0.4.1" classifier "linux-cpu-x86_64",
-  "org.platanios" %% "tensorflow-data" % "0.4.1"
+  "org.platanios" %% "tensorflow" % "0.4.2-SNAPSHOT" classifier "linux-cpu-x86_64",
+  "org.platanios" %% "tensorflow-data" % "0.4.2-SNAPSHOT"
 )
 
 val audiofile = Seq(
