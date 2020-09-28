@@ -54,7 +54,66 @@ object providers {
     }
 
   object tensorflow {
-    def fresh(recommender: Recommender): Managed[Throwable, Recommender.Service] = ???
+    sealed abstract class Service(val session: core.client.Session)
+        extends Recommender.Service
+
+    def fresh(recommender: Recommender): Managed[Throwable, Recommender.Service] = {
+      ZManaged.make(acquireFresh(recommender))(releaseFresh)
+    }
+
+    trait Model {
+      val variables: {
+        val estimatedDist: Variable[Float]
+      }
+
+      val outputs: {
+        val estimatedDist: Output[Float]
+        val choice: Output[Int]
+      }
+    }
+
+    def buildModel(recommender: Recommender, graph: Graph): Model = tf.createWith(graph) {
+      val choices = recommender.choices
+
+      new Model {
+        val variables = new {
+          val estimatedDist = tf.variable[Float]("estimatedDist",
+                                                 Shape(choices.size),
+                                                 tf.RandomUniformInitializer())
+        }
+
+        val outputs = new {
+          val estimatedDist = variables.estimatedDist.toOutput
+          val choice = tf.argmax(estimatedDist, 0, INT32)
+        }
+      }
+    }
+
+    def acquireFresh(recommender: Recommender): Task[Service] = Task {
+      val graph = Graph()
+      val model = buildModel(recommender, graph)
+      val session = core.client.Session(graph)
+
+      tf.createWith(graph) {
+        session.run(targets = tf.globalVariablesInitializer())
+      }
+
+      new Service(session) {
+        def recommend: Task[String] = Task {
+          val predictedChoice = session.run(fetches = model.outputs.choice)
+          val choiceIndex = predictedChoice.scalar
+          recommender.choices(choiceIndex)
+        }
+
+        def update(actual: String): Task[Unit] = Task {
+          ()
+        }
+      }
+    }
+
+    def releaseFresh(service: Service): UIO[Unit] = UIO {
+      service.session.close()
+    }
   }
 }
 
