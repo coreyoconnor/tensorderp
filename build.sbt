@@ -1,4 +1,4 @@
-resolvers += "Sonatype OSS Snapshots" at "https://oss.sonatype.org/content/repositories/snapshots"
+resolvers += Resolver.sonatypeRepo("snapshots")
 
 val zio = Seq(
   "dev.zio" %% "zio" % "1.0.0"

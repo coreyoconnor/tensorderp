@@ -83,8 +83,7 @@ object providers {
       }
     }
 
-    sealed abstract class Service(val session: core.client.Session,
-                                  val model: Model)
+    sealed abstract class Service(val session: core.client.Session)
         extends Recommender.Service
 
     def fresh(recommender: Recommender): Managed[Throwable, Recommender.Service] = {
@@ -129,7 +128,7 @@ object providers {
         session.run(targets = tf.globalVariablesInitializer())
       }
 
-      new Service(session, model) {
+      new Service(session) {
         def recommend: Task[String] = Task {
           val predictedChoice: Int = session.run(fetches = model.outputs.choice).scalar
           recommender.choices(predictedChoice)
