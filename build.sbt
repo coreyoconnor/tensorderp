@@ -1,24 +1,24 @@
 resolvers += Resolver.sonatypeRepo("snapshots")
+scalaVersion := "2.13.6"
 
 val zio = Seq(
-  "dev.zio" %% "zio" % "1.0.0"
+  "dev.zio" %% "zio" % Versions.zio
 )
 
 val tensorflow = Seq(
-  "org.platanios" %% "tensorflow" % "0.4.2-SNAPSHOT" classifier "linux-cpu-x86_64",
-  "org.platanios" %% "tensorflow-data" % "0.4.2-SNAPSHOT"
+  "org.platanios" %% "tensorflow" % Versions.tensorflow classifier "linux",
+  "org.platanios" %% "tensorflow-data" % Versions.tensorflow
 )
 
 val audiofile = Seq(
-  "de.sciss" %% "audiofile" % "1.5.1"
+  "de.sciss" %% "audiofile" % Versions.audiofile
 )
 
 lazy val root = (project in file("."))
   .settings(
     name := "tensorderp",
     organization := "glngn",
-    version := "0.1.0-SNAPSHOT",
-    scalaVersion := "2.12.10",
+    version := "0.2.0-SNAPSHOT",
     libraryDependencies ++= tensorflow ++ audiofile ++ zio,
-    libraryDependencies += "com.chuusai" %% "shapeless" % "2.4.0-M1"
+    libraryDependencies += "com.chuusai" %% "shapeless" % Versions.shapeless
   )
